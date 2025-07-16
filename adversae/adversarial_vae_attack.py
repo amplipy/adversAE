@@ -70,8 +70,8 @@ class LeNetDecoder(nn.Module):
         
         # Transposed convolutional layers (reverse of encoder)
         self.deconv1 = nn.ConvTranspose2d(16, 6, kernel_size=5, stride=2, padding=2, output_padding=1)  # 5x5 -> 10x10
-        self.deconv2 = nn.ConvTranspose2d(6, 1, kernel_size=5, stride=2, padding=2, output_padding=1)   # 10x10 -> 20x20
-        self.final_conv = nn.Conv2d(1, 1, kernel_size=9, padding=4)  # 20x20 -> 28x28
+        self.deconv2 = nn.ConvTranspose2d(6, 6, kernel_size=5, stride=2, padding=2, output_padding=1)   # 10x10 -> 20x20
+        self.deconv3 = nn.ConvTranspose2d(6, 1, kernel_size=9, stride=1, padding=0)  # 20x20 -> 28x28
         
     def forward(self, z):
         # Fully connected layers
@@ -85,7 +85,7 @@ class LeNetDecoder(nn.Module):
         # Transposed convolutional layers
         x = F.relu(self.deconv1(x))
         x = F.relu(self.deconv2(x))
-        x = torch.sigmoid(self.final_conv(x))
+        x = torch.sigmoid(self.deconv3(x))
         
         return x
 
@@ -369,22 +369,65 @@ def evaluate_attack_effectiveness(model, original, adversarial, device):
         return orig_error, adv_error, latent_distance, input_perturbation
 
 
-def main():
-    """Main function to demonstrate adversarial attacks on VAE"""
-    # Set device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+def get_mnist_loaders(batch_size_train=128, batch_size_test=64, data_dir='./data'):
+    """
+    Load MNIST dataset and return train and test data loaders
     
-    # Load MNIST dataset
+    Args:
+        batch_size_train: batch size for training data
+        batch_size_test: batch size for test data
+        data_dir: directory to store/load data
+    
+    Returns:
+        train_loader, test_loader
+    """
     transform = transforms.Compose([
         transforms.ToTensor(),
     ])
     
-    train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
-    test_dataset = datasets.MNIST('./data', train=False, transform=transform)
+    train_dataset = datasets.MNIST(data_dir, train=True, download=True, transform=transform)
+    test_dataset = datasets.MNIST(data_dir, train=False, transform=transform)
     
-    train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size_test, shuffle=False)
+    
+    return train_loader, test_loader
+
+
+def get_device():
+    """Get the appropriate device (GPU if available, else CPU)"""
+    if torch.mps.is_available():
+        device = torch.device('mps')
+        print(f"Using device: mps")
+    elif torch.cuda.is_available():
+        device = torch.device('cuda')
+        print(f"Using device: cuda")
+    else:
+        device = torch.device('cpu')
+        print(f"Using device: cpu")
+    return device
+
+
+def save_model(model, filepath):
+    """Save model state dict"""
+    torch.save(model.state_dict(), filepath)
+    print(f"Model saved to {filepath}")
+
+
+def load_model(model, filepath, device):
+    """Load model state dict"""
+    model.load_state_dict(torch.load(filepath, map_location=device))
+    model.to(device)
+    print(f"Model loaded from {filepath}")
+    return model
+
+
+def main():
+    """Main function to demonstrate adversarial attacks on VAE"""
+    device = get_device()
+    
+    # Load MNIST dataset
+    train_loader, test_loader = get_mnist_loaders()
     
     # Initialize VAE model
     model = VAE(latent_dim=2)
