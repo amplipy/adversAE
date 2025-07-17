@@ -1,0 +1,27 @@
+{
+  "timestamp": "20250715_104503",
+  "model_filename": "vae_model_20250715_104503.pth",
+  "config": {
+    "latent_dim": 2,
+    "epochs": 20,
+    "learning_rate": 0.001,
+    "beta": 1.0,
+    "batch_size_train": 128,
+    "batch_size_test": 64,
+    "data_dir": "./data"
+  },
+  "model_architecture": {
+    "type": "VAE",
+    "latent_dim": 2,
+    "total_parameters": 123847,
+    "trainable_parameters": 123847
+  },
+  "training_info": {
+    "final_loss": 145.61924431966145,
+    "initial_loss": 235.88091419270833,
+    "total_epochs": 20,
+    "loss_reduction_percent": 38.26577923100024
+  },
+  "device": "mps",
+  "pytorch_version": "2.5.1"
+}
