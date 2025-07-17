@@ -17,7 +17,7 @@ import numpy as np
 import json
 from datetime import datetime
 from sklearn.linear_model import LinearRegression
-from adversarial_vae_attack import AdversarialAttacks
+from adversae.vae_training.vanilla.vae_trainer1 import AdversarialAttacks
 
 
 def visualize_attack_analysis(original_imgs, original_recons, attack_imgs, attack_recons, 
