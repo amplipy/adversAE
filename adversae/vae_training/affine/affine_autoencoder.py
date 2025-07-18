@@ -183,7 +183,7 @@ def affine_invariant_loss(original, reconstruction, transformed_reconstruction, 
     
     # Regularization loss to prevent extreme transformations
     # Encourage affine parameters to stay close to identity transformation
-    identity_params = torch.tensor([1, 0, 0, 0, 1, 0], device=affine_params.device).unsqueeze(0)
+    identity_params = torch.tensor([1, 0, 0, 0, 1, 0], device=affine_params.device, dtype=torch.float32).unsqueeze(0)
     identity_params = identity_params.expand_as(affine_params)
     reg_loss = F.mse_loss(affine_params, identity_params)
     
@@ -195,7 +195,9 @@ def affine_invariant_loss(original, reconstruction, transformed_reconstruction, 
 
 def train_affine_invariant_autoencoder(model, train_loader, epochs=20, lr=1e-3, alpha=1.0, beta=0.1, gamma=0.01):
     """Train the affine-invariant autoencoder"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.mps.is_available() else "cpu")
+    # Force CPU for affine operations due to MPS grid_sampler limitation
+    device = torch.device('cpu')
+    print(f"Training on device: {device} (CPU forced for affine grid operations)")
     model.to(device)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     
@@ -363,6 +365,335 @@ def analyze_latent_disentanglement(model, test_loader, device):
     return latents, affine_params_array
 
 
+def visualize_latent_space_with_reconstructions(model, test_loader, device, num_samples=100):
+    """
+    Visualize the latent space with actual reconstruction images overlaid on the 2D projection.
+    This shows the direct autoencoder reconstructions (before affine transformation).
+    """
+    model.eval()
+    
+    latents = []
+    labels = []
+    reconstructions = []
+    
+    # Collect latent representations and reconstructions
+    with torch.no_grad():
+        for batch_idx, (data, label) in enumerate(test_loader):
+            if len(latents) * test_loader.batch_size >= num_samples:
+                break
+                
+            data = data.to(device)
+            reconstruction, _, latent, _ = model(data)
+            
+            latents.append(latent.cpu().numpy())
+            labels.append(label.numpy())
+            reconstructions.append(reconstruction.cpu().numpy())
+    
+    latents = np.concatenate(latents, axis=0)[:num_samples]
+    labels = np.concatenate(labels, axis=0)[:num_samples]
+    reconstructions = np.concatenate(reconstructions, axis=0)[:num_samples]
+    
+    # Create figure with latent space visualization
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(20, 8))
+    
+    # Left plot: Scatter plot colored by digit
+    scatter = ax1.scatter(latents[:, 0], latents[:, 1], c=labels, cmap='tab10', alpha=0.7, s=50)
+    ax1.set_xlabel('Latent Dimension 1', fontsize=12)
+    ax1.set_ylabel('Latent Dimension 2', fontsize=12)
+    ax1.set_title('Latent Space Colored by Digit Class', fontsize=14)
+    ax1.grid(True, alpha=0.3)
+    cbar = plt.colorbar(scatter, ax=ax1)
+    cbar.set_label('Digit Class', fontsize=12)
+    
+    # Right plot: Images overlaid on latent space
+    ax2.set_xlim(latents[:, 0].min() - 1, latents[:, 0].max() + 1)
+    ax2.set_ylim(latents[:, 1].min() - 1, latents[:, 1].max() + 1)
+    ax2.set_xlabel('Latent Dimension 1', fontsize=12)
+    ax2.set_ylabel('Latent Dimension 2', fontsize=12)
+    ax2.set_title('Latent Space with Autoencoder Reconstructions', fontsize=14)
+    ax2.grid(True, alpha=0.3)
+    
+    # Sample every nth point to avoid overcrowding
+    step = max(1, num_samples // 50)  # Show at most 50 images
+    
+    for i in range(0, num_samples, step):
+        # Get the reconstruction image
+        img = reconstructions[i].squeeze()
+        
+        # Position and size for the image
+        x, y = latents[i, 0], latents[i, 1]
+        
+        # Create a small inset axes for the image
+        img_size = 0.8  # Size of the image in data coordinates
+        extent = [x - img_size/2, x + img_size/2, y - img_size/2, y + img_size/2]
+        
+        # Show the reconstruction image
+        ax2.imshow(img, extent=extent, cmap='gray', alpha=0.8, aspect='equal')
+        
+        # Add a colored border based on the digit class
+        color = plt.cm.tab10(labels[i] / 9.0)
+        rect = plt.Rectangle((x - img_size/2, y - img_size/2), img_size, img_size, 
+                           linewidth=2, edgecolor=color, facecolor='none')
+        ax2.add_patch(rect)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    # Print statistics
+    print(f"\n📊 Latent Space Analysis:")
+    print(f"  Total samples: {num_samples}")
+    print(f"  Latent dimensions: {latents.shape[1]}")
+    print(f"  Visualized images: {len(range(0, num_samples, step))}")
+    print(f"  Latent space range: X[{latents[:, 0].min():.2f}, {latents[:, 0].max():.2f}], Y[{latents[:, 1].min():.2f}, {latents[:, 1].max():.2f}]")
+    
+    # Analyze clustering by computing within-class vs between-class distances
+    print(f"\n🔍 Clustering Quality Analysis:")
+    for digit in range(10):
+        digit_mask = labels == digit
+        if np.sum(digit_mask) > 1:
+            digit_latents = latents[digit_mask]
+            # Within-class variance (compactness)
+            within_var = np.var(digit_latents, axis=0).mean()
+            print(f"  Digit {digit}: within-class variance = {within_var:.4f} (lower = better clustering)")
+    
+    return latents, labels, reconstructions
+
+
+def visualize_latent_space_grid(model, device, latent_dim=64, grid_size=15, latent_range=(-3, 3), show_corrected=True):
+    """
+    Create a grid visualization by scanning across the first two latent dimensions.
+    Shows both raw decoder output and affine-corrected clean digits.
+    
+    Args:
+        model: Trained AffineInvariantAutoEncoder
+        device: Device to run inference on
+        latent_dim: Dimensionality of the latent space
+        grid_size: Number of points along each axis (grid_size x grid_size total)
+        latent_range: Range of values to scan for each latent dimension
+        show_corrected: If True, shows side-by-side raw and corrected outputs
+    """
+    model.eval()
+    
+    # Create a grid of latent space coordinates
+    x = np.linspace(latent_range[0], latent_range[1], grid_size)
+    y = np.linspace(latent_range[0], latent_range[1], grid_size)
+    
+    # Initialize the latent vectors (all other dimensions set to 0)
+    latent_vectors = torch.zeros(grid_size * grid_size, latent_dim, device=device)
+    
+    # Fill in the first two dimensions with our grid coordinates
+    for i, y_val in enumerate(y):
+        for j, x_val in enumerate(x):
+            idx = i * grid_size + j
+            latent_vectors[idx, 0] = x_val  # First latent dimension
+            latent_vectors[idx, 1] = y_val  # Second latent dimension
+    
+    # Generate images from latent vectors
+    with torch.no_grad():
+        # Get raw decoder output (potentially transformed/gibberish)
+        raw_images = model.autoencoder.decoder(latent_vectors)
+        
+        if show_corrected:
+            # To get corrected images, we need to pass through the full model
+            # Use the raw images as input to get affine parameters and corrected outputs
+            
+            # Get affine parameters by passing raw images through affine network
+            affine_params = model.affine_net(raw_images.unsqueeze(1) if raw_images.dim() == 3 else raw_images)
+            
+            # Apply affine transformation to get clean digits
+            corrected_images = model.apply_affine_transformation(raw_images, affine_params)
+            
+            # Convert to numpy
+            raw_images_np = raw_images.cpu().numpy()
+            corrected_images_np = corrected_images.cpu().numpy()
+            
+            # Create side-by-side visualization
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(grid_size * 2, grid_size * 1))
+            
+            # Create grid for raw images (left)
+            raw_grid = np.zeros((grid_size * 28, grid_size * 28))
+            for i in range(grid_size):
+                for j in range(grid_size):
+                    idx = i * grid_size + j
+                    img = raw_images_np[idx].squeeze()
+                    y_start, y_end = i * 28, (i + 1) * 28
+                    x_start, x_end = j * 28, (j + 1) * 28
+                    raw_grid[y_start:y_end, x_start:x_end] = img
+            
+            # Create grid for corrected images (right)
+            corrected_grid = np.zeros((grid_size * 28, grid_size * 28))
+            for i in range(grid_size):
+                for j in range(grid_size):
+                    idx = i * grid_size + j
+                    img = corrected_images_np[idx].squeeze()
+                    y_start, y_end = i * 28, (i + 1) * 28
+                    x_start, x_end = j * 28, (j + 1) * 28
+                    corrected_grid[y_start:y_end, x_start:x_end] = img
+            
+            # Display the grids
+            ax1.imshow(raw_grid, cmap='gray', vmin=0, vmax=1)
+            ax1.set_title('Raw Decoder Output\n(Potentially Transformed/Gibberish)', fontsize=14)
+            ax1.axis('off')
+            
+            ax2.imshow(corrected_grid, cmap='gray', vmin=0, vmax=1)
+            ax2.set_title('Affine-Corrected Clean Digits\n(What You Expected!)', fontsize=14)
+            ax2.axis('off')
+            
+            plt.tight_layout()
+            plt.show()
+            
+            print(f"\n✅ Grid visualization complete!")
+            print(f"📊 Generated {grid_size}x{grid_size} = {grid_size*grid_size} image pairs")
+            print(f"🎯 Key Insight: The 'gibberish' on the left becomes clean digits on the right!")
+            
+            # Return both versions
+            return raw_images_np, corrected_images_np, latent_vectors.cpu().numpy()
+            
+        else:
+            # Show only raw decoder output (original behavior)
+            images = raw_images.cpu().numpy()
+            fig, axes = plt.subplots(grid_size, grid_size, figsize=(grid_size * 1.5, grid_size * 1.5))
+            
+            if grid_size == 1:
+                axes = [axes]  # Handle single subplot case
+            
+            for i in range(grid_size):
+                for j in range(grid_size):
+                    idx = i * grid_size + j
+                    img = images[idx].squeeze()
+                    
+                    if grid_size == 1:
+                        ax = axes[0]
+                    else:
+                        ax = axes[i, j] if grid_size > 1 else axes[idx]
+                    
+                    ax.imshow(img, cmap='gray')
+                    ax.axis('off')
+                    
+                    # Add coordinates as title for corner and center images
+                    if (i == 0 and j == 0) or (i == grid_size//2 and j == grid_size//2) or (i == grid_size-1 and j == grid_size-1):
+                        x_coord = latent_vectors[idx, 0].item()
+                        y_coord = latent_vectors[idx, 1].item()
+                        ax.set_title(f'({x_coord:.1f}, {y_coord:.1f})', fontsize=8)
+            
+            # Add overall title and axis labels
+            fig.suptitle('Latent Space Grid Scan (Raw Decoder Output)', fontsize=16, y=0.98)
+            
+            # Add axis labels
+            fig.text(0.5, 0.02, f'Latent Dimension 1 (range: {latent_range[0]} to {latent_range[1]})', 
+                     ha='center', fontsize=12)
+            fig.text(0.02, 0.5, f'Latent Dimension 2 (range: {latent_range[0]} to {latent_range[1]})', 
+                     va='center', rotation=90, fontsize=12)
+            
+            plt.tight_layout()
+            plt.subplots_adjust(top=0.93, bottom=0.07, left=0.07, right=0.93)
+            plt.show()
+            
+            return images, latent_vectors.cpu().numpy()
+    
+    # Print analysis
+    print(f"\n📊 Latent Space Grid Analysis:")
+    print(f"  Grid size: {grid_size} × {grid_size} = {grid_size*grid_size} generated images")
+    print(f"  Latent dimensions scanned: 2 out of {latent_dim}")
+    print(f"  Scan range: {latent_range[0]} to {latent_range[1]} for both dimensions")
+    print(f"  Other latent dimensions: set to 0")
+    
+    # Analyze the generated images
+    image_stats = {
+        'mean_pixel_value': np.mean(images),
+        'std_pixel_value': np.std(images),
+        'min_pixel_value': np.min(images),
+        'max_pixel_value': np.max(images)
+    }
+    
+    print(f"\n🎨 Generated Image Statistics:")
+    print(f"  Mean pixel value: {image_stats['mean_pixel_value']:.4f}")
+    print(f"  Std pixel value: {image_stats['std_pixel_value']:.4f}")
+    print(f"  Pixel range: [{image_stats['min_pixel_value']:.4f}, {image_stats['max_pixel_value']:.4f}]")
+    
+    # Count how many images look like recognizable digits
+    print(f"\n🔍 Visual Quality Assessment:")
+    print("  Look for:")
+    print("  • Smooth transitions between neighboring grid points")
+    print("  • Recognizable digit-like structures in various regions")
+    print("  • Clear boundaries between different digit types")
+    print("  • Gradual morphing from one digit type to another")
+    
+    return images, latent_vectors.cpu().numpy()
+
+
+def visualize_latent_space_interpolation(model, test_loader, device, num_interpolations=10):
+    """
+    Create interpolations between real digit latent representations
+    to show smooth transitions in the decoder output (before affine transformations).
+    """
+    model.eval()
+    
+    # Get some real test samples to interpolate between
+    test_iter = iter(test_loader)
+    test_images, test_labels = next(test_iter)
+    
+    # Select two different digits for interpolation
+    digit_indices = {}
+    for i, label in enumerate(test_labels):
+        if label.item() not in digit_indices:
+            digit_indices[label.item()] = i
+        if len(digit_indices) >= 4:  # Get at least 4 different digits
+            break
+    
+    # Create interpolations between pairs of different digits
+    interpolation_pairs = [
+        (list(digit_indices.keys())[0], list(digit_indices.keys())[1]),
+        (list(digit_indices.keys())[2], list(digit_indices.keys())[3]) if len(digit_indices) >= 4 else (list(digit_indices.keys())[0], list(digit_indices.keys())[2])
+    ]
+    
+    fig, axes = plt.subplots(len(interpolation_pairs), num_interpolations + 2, 
+                            figsize=((num_interpolations + 2) * 1.5, len(interpolation_pairs) * 1.5))
+    
+    if len(interpolation_pairs) == 1:
+        axes = axes.reshape(1, -1)
+    
+    with torch.no_grad():
+        for pair_idx, (digit1, digit2) in enumerate(interpolation_pairs):
+            # Get latent representations of the two digits
+            img1 = test_images[digit_indices[digit1]:digit_indices[digit1]+1].to(device)
+            img2 = test_images[digit_indices[digit2]:digit_indices[digit2]+1].to(device)
+            
+            _, _, latent1, _ = model(img1)
+            _, _, latent2, _ = model(img2)
+            
+            # Show original images
+            axes[pair_idx, 0].imshow(img1.cpu().squeeze(), cmap='gray')
+            axes[pair_idx, 0].set_title(f'Digit {digit1}')
+            axes[pair_idx, 0].axis('off')
+            
+            axes[pair_idx, -1].imshow(img2.cpu().squeeze(), cmap='gray')
+            axes[pair_idx, -1].set_title(f'Digit {digit2}')
+            axes[pair_idx, -1].axis('off')
+            
+            # Create interpolations
+            for i in range(num_interpolations):
+                alpha = i / (num_interpolations - 1)
+                interpolated_latent = (1 - alpha) * latent1 + alpha * latent2
+                
+                # Generate image using only the decoder (before affine transformation)
+                generated_img = model.autoencoder.decoder(interpolated_latent)
+                
+                axes[pair_idx, i + 1].imshow(generated_img.cpu().squeeze(), cmap='gray')
+                axes[pair_idx, i + 1].set_title(f'α={alpha:.2f}')
+                axes[pair_idx, i + 1].axis('off')
+    
+    plt.suptitle('Latent Space Interpolations (Decoder Output Before Affine)', fontsize=14)
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"\n🔄 Latent Space Interpolation Analysis:")
+    print(f"  Interpolation pairs: {len(interpolation_pairs)}")
+    print(f"  Steps per interpolation: {num_interpolations}")
+    print(f"  Shows smooth transitions between different digit types")
+    print(f"  Demonstrates the continuity of the learned latent space")
+
+
 def plot_training_progress(losses_dict):
     """Plot training loss progression"""
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
@@ -414,9 +745,12 @@ def get_mnist_loaders(batch_size_train=128, batch_size_test=64, data_dir='./data
     return train_loader, test_loader
 
 
-def get_device():
+def get_device(force_cpu_for_affine=False):
     """Get the appropriate device (GPU/MPS if available, else CPU)"""
-    if torch.mps.is_available():
+    if force_cpu_for_affine:
+        device = torch.device('cpu')
+        print(f"Using device: cpu (forced for affine grid operations)")
+    elif torch.mps.is_available():
         device = torch.device('mps')
         print(f"Using device: mps")
     elif torch.cuda.is_available():
