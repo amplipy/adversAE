@@ -1269,6 +1269,85 @@ def save_model_cloud(model, config, losses, device):
     print(f"💾 Saved: {model_file}, {metadata_file}")
     return model_file, metadata_file
 
+def load_model_cloud(model_file, device=None):
+    """Load a saved model for cloud deployment with automatic config detection"""
+    if not os.path.exists(model_file):
+        raise FileNotFoundError(f"Model file not found: {model_file}")
+    
+    # Load checkpoint
+    checkpoint = torch.load(model_file, map_location='cpu')
+    config = checkpoint['config']
+    
+    # Auto-detect device if not specified
+    if device is None:
+        device = get_cloud_device(config)
+    
+    # Determine model type and create appropriate model
+    if 'content_latent_dim' in config and 'transform_latent_dim' in config:
+        # Structured model
+        model = StructuredAffineInvariantAutoEncoder(
+            content_dim=config['content_latent_dim'],
+            transform_dim=config['transform_latent_dim']
+        )
+        print(f"🏗️ Created structured model: {config['content_latent_dim']}D content + {config['transform_latent_dim']}D transform")
+    else:
+        # Standard model
+        model = AffineInvariantAutoEncoder(latent_dim=config['latent_dim'])
+        print(f"🏗️ Created standard model: {config['latent_dim']}D latent")
+    
+    # Load weights and move to device
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(device)
+    model.eval()
+    
+    print(f"✅ Loaded model from: {model_file}")
+    print(f"🎯 Device: {device}")
+    print(f"📅 Training date: {config.get('timestamp', 'unknown')}")
+    
+    return model, config, device
+
+def list_saved_models(pattern="*model*.pth"):
+    """List all saved model files in current directory"""
+    import glob
+    
+    model_files = glob.glob(pattern)
+    model_files.sort(reverse=True)  # Most recent first
+    
+    if not model_files:
+        print("📁 No saved models found")
+        return []
+    
+    print(f"📁 Found {len(model_files)} saved models:")
+    for i, file in enumerate(model_files):
+        # Try to get timestamp from filename
+        try:
+            timestamp_part = file.split('_')[-1].replace('.pth', '')
+            if len(timestamp_part) == 15:  # YYYYMMDD_HHMMSS format
+                formatted_time = f"{timestamp_part[:8]}_{timestamp_part[9:]}"
+                print(f"  {i+1}. {file} ({formatted_time})")
+            else:
+                print(f"  {i+1}. {file}")
+        except:
+            print(f"  {i+1}. {file}")
+    
+    return model_files
+
+def quick_load_latest(model_type="structured"):
+    """Quick load the most recent model of specified type"""
+    if model_type == "structured":
+        models = list_saved_models("structured_model*.pth")
+    else:
+        models = list_saved_models("autoencoder_model*.pth")
+    
+    if not models:
+        print(f"❌ No {model_type} models found")
+        return None, None, None
+    
+    latest_model = models[0]
+    print(f"🚀 Quick loading latest {model_type} model: {latest_model}")
+    
+    return load_model_cloud(latest_model)
+
 def plot_structured_training_progress(losses):
     """Plot training progress for structured autoencoder"""
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
@@ -1387,3 +1466,207 @@ def visualize_latent_space(model, test_loader, device, latent_dim):
     plt.show()
     
     print(f"📊 Latent space shape: {latent_data.shape}")
+
+def show_random_reconstructions(model, test_loader, device, num_samples=8):
+    """Show random digit reconstructions with original, before affine, and after affine"""
+    model.eval()
+    
+    # Get random test samples
+    test_iter = iter(test_loader)
+    test_images, test_labels = next(test_iter)
+    
+    # Select random samples
+    indices = torch.randperm(len(test_images))[:num_samples]
+    samples = test_images[indices].to(device)
+    labels = test_labels[indices]
+    
+    with torch.no_grad():
+        if hasattr(model, 'structured_autoencoder'):
+            # Structured autoencoder
+            reconstructed, content_latent, transform_latent, affine_params = model(samples)
+            # Create affine-corrected version
+            corrected = model.apply_affine_transformation(reconstructed, affine_params)
+        else:
+            # Standard autoencoder
+            reconstructed, _, latent, affine_params = model(samples)
+            corrected = model.apply_affine_transformation(reconstructed, affine_params)
+    
+    # Visualize results
+    fig, axes = plt.subplots(4, num_samples, figsize=(num_samples * 2, 8))
+    
+    for i in range(num_samples):
+        # Original
+        axes[0, i].imshow(samples[i].cpu().squeeze(), cmap='gray')
+        axes[0, i].set_title(f'Original\nDigit: {labels[i].item()}')
+        axes[0, i].axis('off')
+        
+        # Reconstruction (before affine)
+        axes[1, i].imshow(reconstructed[i].cpu().squeeze(), cmap='gray')
+        axes[1, i].set_title('Before Affine')
+        axes[1, i].axis('off')
+        
+        # After affine correction
+        axes[2, i].imshow(corrected[i].cpu().squeeze(), cmap='gray')
+        axes[2, i].set_title('After Affine')
+        axes[2, i].axis('off')
+        
+        # Affine parameters
+        params = affine_params[i].cpu().numpy()
+        axes[3, i].text(0.1, 0.8, f'a={params[0]:.2f} b={params[1]:.2f}', transform=axes[3, i].transAxes, fontsize=8)
+        axes[3, i].text(0.1, 0.6, f'c={params[2]:.2f} d={params[3]:.2f}', transform=axes[3, i].transAxes, fontsize=8)
+        axes[3, i].text(0.1, 0.4, f'tx={params[4]:.2f} ty={params[5]:.2f}', transform=axes[3, i].transAxes, fontsize=8)
+        axes[3, i].set_title('Affine Params')
+        axes[3, i].axis('off')
+    
+    plt.suptitle('🎲 Random Digit Reconstructions', fontsize=16)
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"🎯 Reconstructed {num_samples} random samples")
+
+def scan_latent_grid(model, device, grid_size=10, latent_range=(-2, 2)):
+    """Scan through latent space grid and show decoder output BEFORE affine transformation"""
+    model.eval()
+    
+    # Determine latent dimension and model type
+    if hasattr(model, 'structured_autoencoder'):
+        # Structured autoencoder - scan content space (2D)
+        content_dim = model.structured_autoencoder.content_dim
+        transform_dim = model.structured_autoencoder.transform_dim
+        total_dim = content_dim + transform_dim
+        print(f"🔍 Scanning structured latent space: {content_dim}D content + {transform_dim}D transform")
+    else:
+        # Standard autoencoder
+        total_dim = model.autoencoder.latent_dim
+        print(f"🔍 Scanning standard latent space: {total_dim}D")
+    
+    # Create grid coordinates
+    x = np.linspace(latent_range[0], latent_range[1], grid_size)
+    y = np.linspace(latent_range[0], latent_range[1], grid_size)
+    
+    # Generate images
+    images = []
+    with torch.no_grad():
+        for i, y_val in enumerate(y):
+            for j, x_val in enumerate(x):
+                if hasattr(model, 'structured_autoencoder'):
+                    # Create structured latent vector
+                    content_latent = torch.zeros(1, content_dim, device=device)
+                    transform_latent = torch.zeros(1, transform_dim, device=device)
+                    content_latent[0, 0] = x_val  # First content dimension
+                    if content_dim > 1:
+                        content_latent[0, 1] = y_val  # Second content dimension
+                    
+                    # Combine and decode
+                    combined_latent = torch.cat([content_latent, transform_latent], dim=1)
+                    img = model.structured_autoencoder.decoder(combined_latent)
+                else:
+                    # Standard autoencoder
+                    latent_vector = torch.zeros(1, total_dim, device=device)
+                    latent_vector[0, 0] = x_val  # First latent dimension
+                    latent_vector[0, 1] = y_val  # Second latent dimension
+                    img = model.autoencoder.decoder(latent_vector)
+                
+                images.append(img.cpu().squeeze().numpy())
+    
+    # Create grid visualization
+    fig, ax = plt.subplots(figsize=(12, 12))
+    
+    # Combine all images into one large grid
+    grid_img = np.zeros((grid_size * 28, grid_size * 28))
+    for i in range(grid_size):
+        for j in range(grid_size):
+            idx = i * grid_size + j
+            y_start, y_end = i * 28, (i + 1) * 28
+            x_start, x_end = j * 28, (j + 1) * 28
+            grid_img[y_start:y_end, x_start:x_end] = images[idx]
+    
+    ax.imshow(grid_img, cmap='gray', vmin=0, vmax=1)
+    ax.set_title(f'🗺️ Latent Space Grid Scan (BEFORE Affine Transform)\nRange: [{latent_range[0]}, {latent_range[1]}]', fontsize=14)
+    ax.axis('off')
+    
+    # Add coordinate labels
+    ax.text(0.5, -0.05, f'Latent Dimension 1 →', transform=ax.transAxes, ha='center', fontsize=12)
+    ax.text(-0.05, 0.5, f'Latent Dimension 2 →', transform=ax.transAxes, ha='center', rotation=90, va='center', fontsize=12)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"📊 Generated {grid_size}×{grid_size} = {grid_size**2} images from latent grid")
+    return images
+
+def show_affine_perturbations(model, test_loader, device, num_samples=6):
+    """Show reconstruction after applying different affine perturbations"""
+    model.eval()
+    
+    # Get test samples
+    test_iter = iter(test_loader)
+    test_images, test_labels = next(test_iter)
+    samples = test_images[:num_samples].to(device)
+    labels = test_labels[:num_samples]
+    
+    # Define different affine transformations
+    perturbations = {
+        'Original': torch.tensor([[1.0, 0.0, 0.0, 0.0, 1.0, 0.0]], device=device),  # Identity
+        'Rotate 15°': torch.tensor([[0.966, -0.259, 0.0, 0.259, 0.966, 0.0]], device=device),  # Rotation
+        'Scale 0.8': torch.tensor([[0.8, 0.0, 0.0, 0.0, 0.8, 0.0]], device=device),  # Scaling
+        'Shear X': torch.tensor([[1.0, 0.3, 0.0, 0.0, 1.0, 0.0]], device=device),  # Shear
+        'Translate': torch.tensor([[1.0, 0.0, 0.1, 0.0, 1.0, 0.1]], device=device),  # Translation
+        'Combined': torch.tensor([[0.9, 0.2, 0.05, -0.1, 0.9, -0.05]], device=device),  # Multiple
+    }
+    
+    with torch.no_grad():
+        if hasattr(model, 'structured_autoencoder'):
+            # Get reconstruction from structured autoencoder
+            base_recon, content_latent, transform_latent, _ = model(samples)
+        else:
+            # Get reconstruction from standard autoencoder
+            base_recon, _, latent, _ = model(samples)
+    
+    # Visualize results
+    fig, axes = plt.subplots(len(perturbations), num_samples, figsize=(num_samples * 2, len(perturbations) * 2))
+    
+    for row, (name, affine_params) in enumerate(perturbations.items()):
+        for col in range(num_samples):
+            if name == 'Original':
+                # Show original reconstruction
+                img = base_recon[col]
+            else:
+                # Apply affine transformation to base reconstruction
+                affine_batch = affine_params.expand(1, -1)  # Expand for batch
+                img = model.apply_affine_transformation(base_recon[col:col+1], affine_batch)[0]
+            
+            axes[row, col].imshow(img.cpu().squeeze(), cmap='gray')
+            
+            # Add title only on first column
+            if col == 0:
+                axes[row, col].set_ylabel(name, rotation=0, ha='right', va='center', fontsize=12)
+            
+            # Add digit label only on first row
+            if row == 0:
+                axes[row, col].set_title(f'Digit {labels[col].item()}', fontsize=10)
+            
+            axes[row, col].axis('off')
+    
+    plt.suptitle('🔄 Affine Perturbation Effects on Reconstructions', fontsize=16)
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"🎭 Applied {len(perturbations)} different affine transformations to {num_samples} samples")
+
+def comprehensive_visualization(model, test_loader, device):
+    """Run all visualizations in sequence for complete analysis"""
+    print("🚀 Starting Comprehensive Visualization Suite")
+    print("=" * 60)
+    
+    print("\n1️⃣ Random Reconstructions...")
+    show_random_reconstructions(model, test_loader, device)
+    
+    print("\n2️⃣ Latent Space Grid Scan...")
+    scan_latent_grid(model, device)
+    
+    print("\n3️⃣ Affine Perturbation Analysis...")
+    show_affine_perturbations(model, test_loader, device)
+    
+    print("\n✅ Comprehensive visualization complete!")
+    print("=" * 60)
