@@ -239,7 +239,7 @@ def save_model(model, filepath):
 
 def load_model(model, filepath, device):
     """Load model state dict"""
-    model.load_state_dict(torch.load(filepath, map_location=device))
+    model.load_state_dict(torch.load(filepath, map_location=device, weights_only=False))
     model.to(device)
     print(f"Model loaded from {filepath}")
     return model
@@ -495,7 +495,8 @@ def load_model_for_viz(filename, model_class, device=None):
     if device is None:
         device = get_device()
     
-    checkpoint = torch.load(filename, map_location=device)
+    # Load with weights_only=False to handle numpy data and config objects
+    checkpoint = torch.load(filename, map_location=device, weights_only=False)
     
     # Extract model parameters from state dict to recreate model
     state_dict = checkpoint['model_state_dict']
