@@ -1,13 +1,14 @@
 """
-Affine-Invariant Autoencoder for MNIST
-This implementation creates autoencoders with affine transformation branches
-to disentangle geometric transformations from digit identity.
+Affine-Invariant Autoencoder for MNIST - Shared Components
+This module contains shared classes and functions used by both standard 64D and structured 2D+6D autoencoders.
 
 Includes:
-- Classic 64D Autoencoder
-- Structured 2D+6D Autoencoder  
-- Cloud-optimized training functions
-- Comprehensive visualization tools
+- AffineTransformationNetwork (shared by both model types)
+- Loss functions (original and simplified)
+- Data loading utilities
+- Device management
+- Model loading/saving utilities
+- Common visualization functions
 """
 
 import torch
@@ -18,10 +19,11 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
-from tqdm import tqdm
 import os
 import json
+import glob
+from matplotlib.patches import Patch
+from tqdm import tqdm
 from datetime import datetime
 
 
@@ -73,98 +75,9 @@ class AffineTransformationNetwork(nn.Module):
         return affine_params
 
 
-class AutoEncoder(nn.Module):
-    """
-    Standard autoencoder for learning digit representations
-    without geometric transformation information.
-    """
-    def __init__(self, latent_dim=64):
-        super(AutoEncoder, self).__init__()
-        self.latent_dim = latent_dim
-        
-        # Encoder
-        self.encoder = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=4, stride=2, padding=1),  # 28x28 -> 14x14
-            nn.ReLU(True),
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),  # 14x14 -> 7x7
-            nn.ReLU(True),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),  # 7x7 -> 4x4
-            nn.ReLU(True),
-            nn.Flatten(),
-            nn.Linear(128 * 4 * 4, 512),
-            nn.ReLU(True),
-            nn.Linear(512, latent_dim)
-        )
-        
-        # Decoder
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 512),
-            nn.ReLU(True),
-            nn.Linear(512, 128 * 4 * 4),
-            nn.ReLU(True),
-            nn.Unflatten(1, (128, 4, 4)),
-            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, padding=1),  # 4x4 -> 7x7
-            nn.ReLU(True),
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),   # 7x7 -> 14x14
-            nn.ReLU(True),
-            nn.ConvTranspose2d(32, 1, kernel_size=4, stride=2, padding=1),    # 14x14 -> 28x28
-            nn.Sigmoid()
-        )
-        
-    def forward(self, x):
-        latent = self.encoder(x)
-        reconstruction = self.decoder(latent)
-        return reconstruction, latent
-
-
-class AffineInvariantAutoEncoder(nn.Module):
-    """
-    Combined model with autoencoder and affine transformation branch
-    for disentangling geometric transformations from digit identity.
-    """
-    def __init__(self, latent_dim=64):
-        super(AffineInvariantAutoEncoder, self).__init__()
-        
-        self.autoencoder = AutoEncoder(latent_dim)
-        self.affine_net = AffineTransformationNetwork()
-        
-    def apply_affine_transformation(self, images, affine_params):
-        """
-        Apply affine transformation to images using the predicted parameters.
-        
-        Args:
-            images: Input images [batch_size, 1, 28, 28]
-            affine_params: Affine parameters [batch_size, 6] -> [a, b, c, d, tx, ty]
-        
-        Returns:
-            Transformed images
-        """
-        batch_size = images.size(0)
-        
-        # Reshape affine parameters to transformation matrices
-        # [a, b, tx]
-        # [c, d, ty]
-        theta = affine_params.view(-1, 2, 3)
-        
-        # Create sampling grid
-        grid = F.affine_grid(theta, images.size(), align_corners=False)
-        
-        # Apply transformation
-        transformed_images = F.grid_sample(images, grid, align_corners=False)
-        
-        return transformed_images
-    
-    def forward(self, x):
-        # Get reconstruction from autoencoder
-        reconstruction, latent = self.autoencoder(x)
-        
-        # Predict affine transformation parameters
-        affine_params = self.affine_net(x)
-        
-        # Apply affine transformation to reconstruction
-        transformed_reconstruction = self.apply_affine_transformation(reconstruction, affine_params)
-        
-        return reconstruction, transformed_reconstruction, latent, affine_params
+# =============================================================================
+# SHARED LOSS FUNCTIONS
+# =============================================================================
 
 
 def affine_invariant_loss(original, reconstruction, transformed_reconstruction, affine_params, 
@@ -200,6 +113,41 @@ def affine_invariant_loss(original, reconstruction, transformed_reconstruction, 
     total_loss = alpha * recon_loss + beta * affine_loss + gamma * reg_loss
     
     return total_loss, recon_loss, affine_loss, reg_loss
+
+
+def simplified_affine_kl_loss(original, transformed_reconstruction, content_latent_mu, content_latent_logvar, 
+                             alpha=1.0, beta=0.001):
+    """
+    Simplified loss function: affine-transformed reconstruction + KL divergence on 2D content latent.
+    
+    This is the clean, principled loss you wanted:
+    - Affine transformation is applied to reconstruction before MSE with original
+    - KL divergence encourages proper probabilistic structure in the 2D content latent space
+    - No regularization on affine parameters or transform latent - let the model learn freely
+    
+    Args:
+        original: Original input images [batch_size, 1, 28, 28]
+        transformed_reconstruction: Affine-corrected reconstruction [batch_size, 1, 28, 28]
+        content_latent_mu: Mean of content latent distribution [batch_size, 2]
+        content_latent_logvar: Log variance of content latent distribution [batch_size, 2]
+        alpha: Weight for reconstruction loss (typically 1.0)
+        beta: Weight for KL divergence (typically small, e.g. 0.001-0.01)
+    
+    Returns:
+        Total loss, reconstruction loss, KL divergence loss
+    """
+    # Reconstruction loss: MSE between affine-corrected reconstruction and original
+    recon_loss = F.mse_loss(transformed_reconstruction, original)
+    
+    # KL divergence loss on 2D content latent space
+    # KL(q(z|x) || p(z)) where p(z) = N(0,I) and q(z|x) = N(mu, sigma^2)
+    kl_loss = -0.5 * torch.sum(1 + content_latent_logvar - content_latent_mu.pow(2) - content_latent_logvar.exp())
+    kl_loss = kl_loss / original.size(0)  # Average over batch
+    
+    # Combined loss
+    total_loss = alpha * recon_loss + beta * kl_loss
+    
+    return total_loss, recon_loss, kl_loss
 
 
 def train_affine_invariant_autoencoder(model, train_loader, epochs=20, lr=1e-3, alpha=1.0, beta=0.1, gamma=0.01):
@@ -897,7 +845,10 @@ def get_cloud_device(config):
     
     return device
 
-class StructuredAutoEncoder(nn.Module):
+
+# =============================================================================
+# SHARED DATA LOADING FUNCTIONS
+# =============================================================================
     """Structured autoencoder with separated content and transform latent spaces"""
     def __init__(self, content_dim=2, transform_dim=6):
         super(StructuredAutoEncoder, self).__init__()
@@ -917,10 +868,11 @@ class StructuredAutoEncoder(nn.Module):
             nn.ReLU(True)
         )
         
-        # Content encoder (digit identity)
-        self.content_encoder = nn.Linear(512, content_dim)
+        # Content encoder (digit identity) - VAE style with mu and logvar
+        self.content_mu = nn.Linear(512, content_dim)
+        self.content_logvar = nn.Linear(512, content_dim)
         
-        # Transform encoder (spatial transformations)
+        # Transform encoder (spatial transformations) - deterministic
         self.transform_encoder = nn.Linear(512, transform_dim)
         
         # Decoder
@@ -938,53 +890,33 @@ class StructuredAutoEncoder(nn.Module):
             nn.Sigmoid()
         )
     
+    def reparameterize(self, mu, logvar):
+        """Reparameterization trick for VAE"""
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+    
     def forward(self, x):
         # Shared encoding
         shared_features = self.shared_encoder(x)
         
-        # Separate content and transform encodings
-        content_latent = self.content_encoder(shared_features)
+        # Content latent with VAE reparameterization
+        content_mu = self.content_mu(shared_features)
+        content_logvar = self.content_logvar(shared_features)
+        content_latent = self.reparameterize(content_mu, content_logvar)
+        
+        # Transform latent (deterministic)
         transform_latent = self.transform_encoder(shared_features)
         
         # Combine and decode
         combined_latent = torch.cat([content_latent, transform_latent], dim=1)
         reconstruction = self.decoder(combined_latent)
         
-        return reconstruction, content_latent, transform_latent
+        return reconstruction, content_latent, transform_latent, content_mu, content_logvar
 
 
 class StructuredAffineInvariantAutoEncoder(nn.Module):
     """Combined structured autoencoder with affine transformation network"""
-    def __init__(self, content_dim=2, transform_dim=6):
-        super(StructuredAffineInvariantAutoEncoder, self).__init__()
-        
-        self.structured_autoencoder = StructuredAutoEncoder(content_dim, transform_dim)
-        self.affine_net = AffineTransformationNetwork()
-    
-    def apply_affine_transformation(self, images, affine_params):
-        """Apply affine transformation to images using the predicted parameters"""
-        batch_size = images.size(0)
-        
-        # Reshape affine parameters to transformation matrices
-        theta = affine_params.view(-1, 2, 3)
-        
-        # Create sampling grid
-        grid = F.affine_grid(theta, images.size(), align_corners=False)
-        
-        # Apply transformation
-        transformed_images = F.grid_sample(images, grid, align_corners=False)
-        
-        return transformed_images
-    
-    def forward(self, x):
-        # Get structured reconstruction
-        reconstruction, content_latent, transform_latent = self.structured_autoencoder(x)
-        
-        # Predict affine transformation parameters
-        affine_params = self.affine_net(x)
-        
-        return reconstruction, content_latent, transform_latent, affine_params
-
 def get_cloud_mnist_loaders(batch_size_train=256, batch_size_test=128, data_dir='../data', pin_memory=True, num_workers=4):
     """Get MNIST data loaders optimized for cloud training"""
     transform = transforms.Compose([
@@ -1007,6 +939,105 @@ def get_cloud_mnist_loaders(batch_size_train=256, batch_size_test=128, data_dir=
     return train_loader, test_loader
 
 def train_structured_autoencoder_cloud(model, train_loader, test_loader, device, config, scaler=None):
+    """Cloud-optimized training for structured autoencoder with your simplified loss"""
+    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], 
+                          weight_decay=config.get('weight_decay', 1e-5))
+    
+    # Learning rate scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.7) if config.get('lr_scheduler', False) else None
+    
+    # Use simplified loss components
+    losses = {'train_loss': [], 'test_loss': [], 'recon_loss': [], 'kl_loss': []}
+    
+    best_test_loss = float('inf')
+    patience_counter = 0
+    
+    for epoch in range(config['epochs']):
+        # Training
+        model.train()
+        train_loss = 0
+        recon_total = 0
+        kl_total = 0
+        
+        for batch_idx, (data, _) in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
+            data = data.to(device)
+            
+            with torch.cuda.amp.autocast() if scaler else torch.enable_grad():
+                # Forward pass - get all outputs including mu and logvar
+                (reconstruction, content_latent, transform_latent, affine_params, 
+                 transformed_reconstruction, content_mu, content_logvar) = model(data)
+                
+                # Use your simplified loss: affine-transformed reconstruction + KL divergence
+                total_loss, recon_loss, kl_loss = simplified_affine_kl_loss(
+                    data, transformed_reconstruction, content_mu, content_logvar,
+                    alpha=config.get('alpha', 1.0), 
+                    beta=config.get('beta', 0.001)
+                )
+            
+            # Backward pass
+            optimizer.zero_grad()
+            if scaler:
+                scaler.scale(total_loss).backward()
+                if config.get('gradient_clip', 0) > 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), config['gradient_clip'])
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                total_loss.backward()
+                if config.get('gradient_clip', 0) > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), config['gradient_clip'])
+                optimizer.step()
+            
+            train_loss += total_loss.item()
+            recon_total += recon_loss.item()
+            kl_total += kl_loss.item()
+        
+        # Testing
+        model.eval()
+        test_loss = 0
+        with torch.no_grad():
+            for data, _ in test_loader:
+                data = data.to(device)
+                (reconstruction, content_latent, transform_latent, affine_params, 
+                 transformed_reconstruction, content_mu, content_logvar) = model(data)
+                
+                total_loss, recon_loss, kl_loss = simplified_affine_kl_loss(
+                    data, transformed_reconstruction, content_mu, content_logvar,
+                    alpha=config.get('alpha', 1.0), 
+                    beta=config.get('beta', 0.001)
+                )
+                test_loss += total_loss.item()
+        
+        # Record losses
+        avg_train = train_loss / len(train_loader)
+        avg_test = test_loss / len(test_loader)
+        losses['train_loss'].append(avg_train)
+        losses['test_loss'].append(avg_test)
+        losses['recon_loss'].append(recon_total / len(train_loader))
+        losses['kl_loss'].append(kl_total / len(train_loader))
+        
+        # Learning rate scheduling
+        if scheduler:
+            scheduler.step(avg_test)
+        
+        # Early stopping
+        if config.get('early_stopping', False):
+            if avg_test < best_test_loss:
+                best_test_loss = avg_test
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= config.get('patience', 10):
+                    print(f"Early stopping at epoch {epoch+1}")
+                    break
+        
+        print(f"Epoch {epoch+1}: Train={avg_train:.6f}, Test={avg_test:.6f}, Recon={recon_total/len(train_loader):.6f}, KL={kl_total/len(train_loader):.6f}")
+    
+    return losses
+
+
+def train_structured_autoencoder_cloud_old(model, train_loader, test_loader, device, config, scaler=None):
     """Cloud-optimized training for structured autoencoder"""
     optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'], 
                           weight_decay=config.get('weight_decay', 1e-5))
@@ -1146,7 +1177,14 @@ def train_autoencoder_cloud(model, train_loader, test_loader, device, config, sc
             data = data.to(device)
             
             with torch.cuda.amp.autocast() if scaler else torch.enable_grad():
-                reconstructed, latent, affine_params = model(data)
+                # Handle different model output formats
+                model_output = model(data)
+                if len(model_output) == 4:
+                    # AffineInvariantAutoEncoder returns: reconstruction, transformed_reconstruction, latent, affine_params
+                    reconstructed, _, latent, affine_params = model_output
+                else:
+                    # Other models might return different formats
+                    reconstructed, latent, affine_params = model_output
                 
                 recon_loss = F.mse_loss(reconstructed, data)
                 identity_params = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], 
@@ -1179,7 +1217,12 @@ def train_autoencoder_cloud(model, train_loader, test_loader, device, config, sc
         with torch.no_grad():
             for data, _ in test_loader:
                 data = data.to(device)
-                reconstructed, latent, affine_params = model(data)
+                model_output = model(data)
+                if len(model_output) == 4:
+                    reconstructed, _, latent, affine_params = model_output
+                else:
+                    reconstructed, latent, affine_params = model_output
+                
                 recon_loss = F.mse_loss(reconstructed, data)
                 identity_params = torch.tensor([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], 
                                              device=device).expand_as(affine_params)
@@ -1348,6 +1391,45 @@ def quick_load_latest(model_type="structured"):
     
     return load_model_cloud(latest_model)
 
+def plot_simplified_training_progress(losses):
+    """Plot training progress for your simplified affine+KL loss"""
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    
+    # Total loss
+    axes[0].plot(losses['train_loss'], label='Train', color='blue', linewidth=2)
+    axes[0].plot(losses['test_loss'], label='Test', color='red', linewidth=2)
+    axes[0].set_title('Total Loss\n(Affine Reconstruction + KL)')
+    axes[0].set_xlabel('Epoch')
+    axes[0].set_ylabel('Loss')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+    
+    # Reconstruction loss (MSE after affine)
+    axes[1].plot(losses['recon_loss'], color='green', linewidth=2)
+    axes[1].set_title('Reconstruction Loss\n(MSE after Affine Transform)')
+    axes[1].set_xlabel('Epoch')
+    axes[1].set_ylabel('Loss')
+    axes[1].grid(True, alpha=0.3)
+    
+    # KL divergence loss
+    axes[2].plot(losses['kl_loss'], color='purple', linewidth=2)
+    axes[2].set_title('KL Divergence Loss\n(2D Content Latent)')
+    axes[2].set_xlabel('Epoch')
+    axes[2].set_ylabel('Loss')
+    axes[2].grid(True, alpha=0.3)
+    
+    plt.suptitle('🎯 Your Simplified Loss Function Training Progress', fontsize=16)
+    plt.tight_layout()
+    plt.show()
+    
+    # Print final loss values
+    print(f"\n📊 Final Loss Values:")
+    print(f"  Total Train Loss: {losses['train_loss'][-1]:.6f}")
+    print(f"  Total Test Loss: {losses['test_loss'][-1]:.6f}")
+    print(f"  Reconstruction Loss: {losses['recon_loss'][-1]:.6f}")
+    print(f"  KL Divergence Loss: {losses['kl_loss'][-1]:.6f}")
+
+
 def plot_structured_training_progress(losses):
     """Plot training progress for structured autoencoder"""
     fig, axes = plt.subplots(2, 3, figsize=(15, 10))
@@ -1449,7 +1531,19 @@ def visualize_latent_space(model, test_loader, device, latent_dim):
             if batch_idx >= 20:
                 break
             data = data.to(device)
-            _, _, latent, _ = model(data)
+            model_output = model(data)
+            
+            # Handle different model output formats
+            if len(model_output) == 4:
+                # AffineInvariantAutoEncoder or StructuredAffineInvariantAutoEncoder
+                if hasattr(model, 'structured_autoencoder'):
+                    _, content_latent, transform_latent, _ = model_output
+                    latent = torch.cat([content_latent, transform_latent], dim=1)
+                else:
+                    _, _, latent, _ = model_output
+            else:
+                _, latent, _ = model_output
+            
             latents.append(latent.cpu().numpy())
             labels.append(label.numpy())
     
@@ -1466,6 +1560,123 @@ def visualize_latent_space(model, test_loader, device, latent_dim):
     plt.show()
     
     print(f"📊 Latent space shape: {latent_data.shape}")
+
+def comprehensive_visualization(model, test_loader, device, config):
+    """
+    Comprehensive visualization for your new simplified affine+KL loss model.
+    Shows the key insight: affine transformation bridges reconstruction and original.
+    """
+    model.eval()
+    
+    # Get test samples
+    test_iter = iter(test_loader)
+    test_images, test_labels = next(test_iter)
+    samples = test_images[:8].to(device)
+    labels = test_labels[:8]
+    
+    with torch.no_grad():
+        # Get all model outputs
+        (reconstruction, content_latent, transform_latent, affine_params, 
+         transformed_reconstruction, content_mu, content_logvar) = model(samples)
+        
+        # Compute loss components for analysis
+        total_loss, recon_loss, kl_loss = simplified_affine_kl_loss(
+            samples, transformed_reconstruction, content_mu, content_logvar,
+            alpha=config.get('alpha', 1.0), beta=config.get('beta', 0.001)
+        )
+    
+    # Create visualization showing the key insight
+    fig, axes = plt.subplots(5, 8, figsize=(16, 10))
+    
+    for i in range(8):
+        # Row 1: Original images
+        axes[0, i].imshow(samples[i].cpu().squeeze(), cmap='gray')
+        axes[0, i].set_title(f'Original\nDigit: {labels[i].item()}', fontsize=10)
+        axes[0, i].axis('off')
+        
+        # Row 2: Direct reconstruction (before affine correction)
+        axes[1, i].imshow(reconstruction[i].cpu().squeeze(), cmap='gray')
+        axes[1, i].set_title('Raw Decoder\nOutput', fontsize=10)
+        axes[1, i].axis('off')
+        
+        # Row 3: After affine transformation (what the loss function optimizes)
+        axes[2, i].imshow(transformed_reconstruction[i].cpu().squeeze(), cmap='gray')
+        axes[2, i].set_title('After Affine\n(Loss Target)', fontsize=10)
+        axes[2, i].axis('off')
+        
+        # Row 4: Content latent space (2D) with actual values
+        content_vals = content_latent[i].cpu().numpy()
+        axes[3, i].scatter([0], [0], s=100, c='red', marker='x')
+        axes[3, i].text(0.1, 0.7, f'c1={content_vals[0]:.2f}', transform=axes[3, i].transAxes, fontsize=8)
+        axes[3, i].text(0.1, 0.5, f'c2={content_vals[1]:.2f}', transform=axes[3, i].transAxes, fontsize=8)
+        axes[3, i].set_xlim(-0.5, 0.5)
+        axes[3, i].set_ylim(-0.5, 0.5)
+        axes[3, i].set_title('2D Content\nLatent', fontsize=10)
+        
+        # Row 5: Affine parameters
+        params = affine_params[i].cpu().numpy()
+        axes[4, i].text(0.05, 0.8, f'a={params[0]:.2f}', transform=axes[4, i].transAxes, fontsize=8)
+        axes[4, i].text(0.05, 0.6, f'b={params[1]:.2f}', transform=axes[4, i].transAxes, fontsize=8)
+        axes[4, i].text(0.05, 0.4, f'c={params[2]:.2f}', transform=axes[4, i].transAxes, fontsize=8)
+        axes[4, i].text(0.55, 0.8, f'd={params[3]:.2f}', transform=axes[4, i].transAxes, fontsize=8)
+        axes[4, i].text(0.55, 0.6, f'tx={params[4]:.2f}', transform=axes[4, i].transAxes, fontsize=8)
+        axes[4, i].text(0.55, 0.4, f'ty={params[5]:.2f}', transform=axes[4, i].transAxes, fontsize=8)
+        axes[4, i].set_title('Affine Params', fontsize=10)
+        axes[4, i].axis('off')
+    
+    plt.suptitle('🎯 Your Simplified Affine+KL Loss Model\nKey: Affine transforms "gibberish" decoder output into clean digits!', fontsize=14)
+    plt.tight_layout()
+    plt.show()
+    
+    # Print loss analysis
+    print(f"\n📊 Loss Analysis (Your Simplified Loss Function):")
+    print(f"  Total Loss: {total_loss.item():.6f}")
+    print(f"  Reconstruction Loss (MSE after affine): {recon_loss.item():.6f}")
+    print(f"  KL Divergence (2D content latent): {kl_loss.item():.6f}")
+    print(f"  Loss weights: α={config.get('alpha', 1.0)} (recon), β={config.get('beta', 0.001)} (KL)")
+    
+    # Analyze content latent space
+    print(f"\n🎨 2D Content Latent Analysis:")
+    print(f"  Content latent shape: {content_latent.shape}")
+    print(f"  Content mu mean: {content_mu.mean(dim=0).cpu().numpy()}")
+    print(f"  Content mu std: {content_mu.std(dim=0).cpu().numpy()}")
+    print(f"  Content logvar mean: {content_logvar.mean(dim=0).cpu().numpy()}")
+    
+    # Show 2D latent space clustering
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Sample latent space (using mu for visualization)
+    colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red', 'tab:purple', 
+              'tab:brown', 'tab:pink', 'tab:gray', 'tab:olive', 'tab:cyan']
+    
+    for i, label in enumerate(labels):
+        mu_vals = content_mu[i].cpu().numpy()
+        ax1.scatter(mu_vals[0], mu_vals[1], c=colors[label.item()], s=100, alpha=0.7, 
+                   label=f'Digit {label.item()}' if i < 8 else '')
+        ax1.text(mu_vals[0], mu_vals[1], str(label.item()), fontsize=8, ha='center', va='center')
+    
+    ax1.set_xlabel('Content Dimension 1')
+    ax1.set_ylabel('Content Dimension 2')
+    ax1.set_title('2D Content Latent Space\n(μ values)')
+    ax1.grid(True, alpha=0.3)
+    
+    # Show actual sampled latent values
+    for i, label in enumerate(labels):
+        latent_vals = content_latent[i].cpu().numpy()
+        ax2.scatter(latent_vals[0], latent_vals[1], c=colors[label.item()], s=100, alpha=0.7)
+        ax2.text(latent_vals[0], latent_vals[1], str(label.item()), fontsize=8, ha='center', va='center')
+    
+    ax2.set_xlabel('Content Dimension 1')
+    ax2.set_ylabel('Content Dimension 2')
+    ax2.set_title('2D Content Latent Space\n(Sampled z values)')
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    print(f"\n✅ Your model insight: The decoder generates 'weird' images, but affine transformation")
+    print(f"   corrects them to match the originals. KL loss keeps the 2D content latent well-structured!")
+
 
 def show_random_reconstructions(model, test_loader, device, num_samples=8):
     """Show random digit reconstructions with original, before affine, and after affine"""
