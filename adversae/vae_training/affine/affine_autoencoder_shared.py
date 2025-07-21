@@ -439,6 +439,131 @@ def show_random_reconstructions(model, test_loader, device, num_samples=8):
     print(f"🎯 Reconstructed {num_samples} random samples")
 
 
+# =============================================================================
+# VISUALIZATION-FOCUSED SAVE/LOAD FUNCTIONS
+# =============================================================================
+
+def save_model_for_viz(model, model_type, config=None, losses=None, extra_data=None, name=None):
+    """
+    Save model with all data needed for visualization
+    
+    Args:
+        model: The trained model
+        model_type: 'standard' or 'structured'
+        config: Training configuration dict
+        losses: Training losses dict
+        extra_data: Additional data (latent embeddings, etc.)
+        name: Optional custom name, otherwise uses timestamp
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if name:
+        filename = f"{model_type}_{name}_{timestamp}.pth"
+    else:
+        filename = f"{model_type}_model_{timestamp}.pth"
+    
+    save_dict = {
+        'model_state_dict': model.state_dict(),
+        'model_type': model_type,
+        'timestamp': timestamp,
+    }
+    
+    if config:
+        save_dict['config'] = config
+    if losses:
+        save_dict['losses'] = losses
+    if extra_data:
+        save_dict['extra_data'] = extra_data
+    
+    torch.save(save_dict, filename)
+    print(f"💾 Saved {model_type} model for visualization: {filename}")
+    return filename
+
+
+def load_model_for_viz(filename, model_class, device=None):
+    """
+    Load model and all visualization data
+    
+    Args:
+        filename: Path to saved model file
+        model_class: Model class to instantiate (e.g., s2d6d.StructuredAffineInvariantAutoEncoder)
+        device: Target device, auto-detected if None
+        
+    Returns:
+        model: Loaded model
+        data_dict: Dict containing config, losses, extra_data, etc.
+    """
+    if device is None:
+        device = get_device()
+    
+    checkpoint = torch.load(filename, map_location=device)
+    
+    # Extract model parameters from state dict to recreate model
+    state_dict = checkpoint['model_state_dict']
+    model_type = checkpoint.get('model_type', 'unknown')
+    
+    # Try to infer model parameters for structured models
+    if 'structured' in model_type.lower():
+        # Look for content/transform dimensions in the saved config
+        config = checkpoint.get('config', {})
+        content_dim = config.get('content_latent_dim', 2)
+        transform_dim = config.get('transform_latent_dim', 6)
+        model = model_class(content_dim=content_dim, transform_dim=transform_dim)
+    else:
+        # Standard model - try to infer latent_dim
+        config = checkpoint.get('config', {})
+        latent_dim = config.get('latent_dim', 64)
+        model = model_class(latent_dim=latent_dim)
+    
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    
+    data_dict = {
+        'config': checkpoint.get('config', {}),
+        'losses': checkpoint.get('losses', {}),
+        'extra_data': checkpoint.get('extra_data', {}),
+        'timestamp': checkpoint.get('timestamp', 'unknown'),
+        'model_type': model_type,
+        'device': device
+    }
+    
+    print(f"📁 Loaded {model_type} model from {filename}")
+    print(f"   Timestamp: {data_dict['timestamp']}")
+    print(f"   Device: {device}")
+    
+    return model, data_dict
+
+
+def quick_save_viz(model, model_type, name="latest"):
+    """Quick save for visualization - just model state"""
+    return save_model_for_viz(model, model_type, name=name)
+
+
+def quick_load_viz(model_class, model_type="structured", name="latest", device=None):
+    """
+    Quick load the most recent model of a given type
+    
+    Args:
+        model_class: Model class to instantiate
+        model_type: 'standard' or 'structured'
+        name: Model name pattern to search for
+        device: Target device
+    """
+    # Find most recent model file matching pattern
+    pattern = f"{model_type}*{name}*.pth"
+    model_files = glob.glob(pattern)
+    
+    if not model_files:
+        print(f"❌ No models found matching pattern: {pattern}")
+        return None, None
+    
+    # Sort by modification time, most recent first
+    model_files.sort(key=os.path.getmtime, reverse=True)
+    latest_file = model_files[0]
+    
+    return load_model_for_viz(latest_file, model_class, device)
+
+
 if __name__ == "__main__":
     print("This is the shared components module for affine-invariant autoencoders.")
     print("Import specific model classes from:")
