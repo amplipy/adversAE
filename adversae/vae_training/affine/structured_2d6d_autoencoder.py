@@ -66,7 +66,19 @@ class StructuredAutoEncoder(nn.Module):
         batch_size = images.size(0)
         
         # Reshape affine parameters to transformation matrices
-        theta = affine_params.view(-1, 2, 3)
+        # Constrain to prevent 90-degree rotations and ensure proper orientation
+        a = torch.tanh(affine_params[:, 0]) * 0.3 + 1.0  # Scale: 0.7 to 1.3
+        b = torch.tanh(affine_params[:, 1]) * 0.2        # Shear: -0.2 to 0.2  
+        c = torch.tanh(affine_params[:, 2]) * 0.2        # Shear: -0.2 to 0.2
+        d = torch.tanh(affine_params[:, 3]) * 0.3 + 1.0  # Scale: 0.7 to 1.3
+        tx = torch.tanh(affine_params[:, 4]) * 0.2       # Translation: -0.2 to 0.2
+        ty = torch.tanh(affine_params[:, 5]) * 0.2       # Translation: -0.2 to 0.2
+        
+        # Build transformation matrix [[a, b, tx], [c, d, ty]]
+        theta = torch.stack([
+            torch.stack([a, b, tx], dim=1),
+            torch.stack([c, d, ty], dim=1)
+        ], dim=1)
         
         # Create sampling grid
         grid = F.affine_grid(theta, images.size(), align_corners=False)

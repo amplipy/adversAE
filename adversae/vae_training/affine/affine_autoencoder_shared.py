@@ -117,34 +117,36 @@ def affine_invariant_loss(original, reconstruction, transformed_reconstruction, 
 def simplified_affine_kl_loss(original, transformed_reconstruction, content_latent_mu, content_latent_logvar, 
                              alpha=1.0, beta=0.001):
     """
-    Simplified loss function: affine-transformed reconstruction + KL divergence on 2D content latent.
-    
-    This is the clean, principled loss you wanted:
-    - Affine transformation is applied to reconstruction before MSE with original
-    - KL divergence encourages proper probabilistic structure in the 2D content latent space
-    - No regularization on affine parameters or transform latent - let the model learn freely
+    Simplified loss function: affine-transformed reconstruction + KL divergence (PROPERLY NORMALIZED).
     
     Args:
         original: Original input images [batch_size, 1, 28, 28]
         transformed_reconstruction: Affine-corrected reconstruction [batch_size, 1, 28, 28]
-        content_latent_mu: Mean of content latent distribution [batch_size, 2]
-        content_latent_logvar: Log variance of content latent distribution [batch_size, 2]
+        content_latent_mu: Mean of latent distribution [batch_size, latent_dim]
+        content_latent_logvar: Log variance of latent distribution [batch_size, latent_dim]
         alpha: Weight for reconstruction loss (typically 1.0)
-        beta: Weight for KL divergence (typically small, e.g. 0.001-0.01)
+        beta: Weight for KL divergence (typically 0.001-0.01, depends on latent_dim)
     
     Returns:
         Total loss, reconstruction loss, KL divergence loss
     """
-    # Reconstruction loss: MSE between affine-corrected reconstruction and original
-    recon_loss = F.mse_loss(transformed_reconstruction, original)
+    batch_size = original.size(0)
+    latent_dim = content_latent_mu.size(1)
     
-    # KL divergence loss on 2D content latent space
+    # Reconstruction loss: MSE between affine-corrected reconstruction and original
+    # Normalize by number of pixels for stability
+    recon_loss = F.mse_loss(transformed_reconstruction, original, reduction='sum')
+    recon_loss = recon_loss / (batch_size * original.numel() / batch_size)  # Per pixel
+    
+    # KL divergence loss - PROPERLY NORMALIZED
     # KL(q(z|x) || p(z)) where p(z) = N(0,I) and q(z|x) = N(mu, sigma^2)
     kl_loss = -0.5 * torch.sum(1 + content_latent_logvar - content_latent_mu.pow(2) - content_latent_logvar.exp())
-    kl_loss = kl_loss / original.size(0)  # Average over batch
+    kl_loss = kl_loss / batch_size  # Per sample, per dimension
     
     # Combined loss
     total_loss = alpha * recon_loss + beta * kl_loss
+    
+    return total_loss, recon_loss, kl_loss
     
     return total_loss, recon_loss, kl_loss
 
