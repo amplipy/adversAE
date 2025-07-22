@@ -16,11 +16,12 @@ import affine_autoencoder_shared as shared
 
 
 class StructuredAutoEncoder(nn.Module):
-    """Structured autoencoder with separated content and transform latent spaces"""
+    """Unified VAE with 8D latent space: 2D content + 6D affine transform (all under KL loss)"""
     def __init__(self, content_dim=2, transform_dim=6):
         super(StructuredAutoEncoder, self).__init__()
         self.content_dim = content_dim
         self.transform_dim = transform_dim
+        self.total_dim = content_dim + transform_dim
         
         # Shared encoder backbone
         self.shared_encoder = nn.Sequential(
@@ -35,16 +36,13 @@ class StructuredAutoEncoder(nn.Module):
             nn.ReLU(True)
         )
         
-        # Content encoder (digit identity) - VAE style with mu and logvar
-        self.content_mu = nn.Linear(512, content_dim)
-        self.content_logvar = nn.Linear(512, content_dim)
+        # Unified VAE encoder - ALL 8 dimensions under KL loss
+        self.latent_mu = nn.Linear(512, self.total_dim)      # 8D mu
+        self.latent_logvar = nn.Linear(512, self.total_dim)  # 8D logvar
         
-        # Transform encoder (spatial transformations) - deterministic
-        self.transform_encoder = nn.Linear(512, transform_dim)
-        
-        # Decoder - ONLY takes content latent, NOT transform!
+        # Decoder - ONLY takes the first 2 dimensions (content)
         self.decoder = nn.Sequential(
-            nn.Linear(content_dim, 512),  # Only content_dim, not content_dim + transform_dim!
+            nn.Linear(content_dim, 512),  # Only first 2 dimensions for digit reconstruction
             nn.ReLU(True),
             nn.Linear(512, 128 * 4 * 4),
             nn.ReLU(True),
@@ -82,39 +80,39 @@ class StructuredAutoEncoder(nn.Module):
         # Shared encoding
         shared_features = self.shared_encoder(x)
         
-        # Content latent with VAE reparameterization
-        content_mu = self.content_mu(shared_features)
-        content_logvar = self.content_logvar(shared_features)
-        content_latent = self.reparameterize(content_mu, content_logvar)
+        # Unified VAE latent space (8D) - ALL under KL loss
+        latent_mu = self.latent_mu(shared_features)
+        latent_logvar = self.latent_logvar(shared_features)
+        full_latent = self.reparameterize(latent_mu, latent_logvar)
         
-        # Transform latent (deterministic)
-        transform_latent = self.transform_encoder(shared_features)
+        # Split the 8D latent: first 2 for content, last 6 for affine transform
+        content_latent = full_latent[:, :self.content_dim]      # First 2 dimensions
+        transform_latent = full_latent[:, self.content_dim:]    # Last 6 dimensions
         
-        # Decode ONLY from content latent - this should produce clean canonical digits
+        # Decode ONLY from content latent (first 2 dims) - produces clean canonical digits
         clean_reconstruction = self.decoder(content_latent)
         
-        # Apply affine transformation to the clean reconstruction
+        # Apply affine transformation using the transform latent (last 6 dims)
         final_reconstruction = self.apply_affine_transformation(clean_reconstruction, transform_latent)
         
-        return clean_reconstruction, final_reconstruction, content_latent, transform_latent, content_mu, content_logvar
+        return clean_reconstruction, final_reconstruction, content_latent, transform_latent, latent_mu, latent_logvar
 
 
 class StructuredAffineInvariantAutoEncoder(nn.Module):
-    """Combined structured autoencoder with affine transformation network"""
+    """Unified 8D VAE: all parameters under KL loss for balanced training"""
     def __init__(self, content_dim=2, transform_dim=6):
         super(StructuredAffineInvariantAutoEncoder, self).__init__()
         
         self.structured_autoencoder = StructuredAutoEncoder(content_dim, transform_dim)
-        # Remove separate affine_net since transform is handled in the structured autoencoder
     
     def forward(self, x):
-        # Get all outputs from structured autoencoder
+        # Get all outputs from unified VAE
         (clean_reconstruction, final_reconstruction, content_latent, 
-         transform_latent, content_mu, content_logvar) = self.structured_autoencoder(x)
+         transform_latent, latent_mu, latent_logvar) = self.structured_autoencoder(x)
         
-        # Return all components for analysis
+        # Return in format compatible with existing training code
         # Order: input_x, content_latent, transform_latent, unused, clean_reconstruction, content_mu, content_logvar, final_reconstruction
-        return x, content_latent, transform_latent, None, clean_reconstruction, content_mu, content_logvar, final_reconstruction
+        return x, content_latent, transform_latent, None, clean_reconstruction, latent_mu, latent_logvar, final_reconstruction
 
 
 def train_structured_autoencoder_simplified(model, train_loader, test_loader, device, config, scaler=None):
@@ -142,13 +140,13 @@ def train_structured_autoencoder_simplified(model, train_loader, test_loader, de
             data = data.to(device)
             
             with torch.cuda.amp.autocast() if scaler else torch.enable_grad():
-                # Forward pass - get all outputs including mu and logvar
+                # Forward pass - get all outputs from unified 8D VAE
                 (input_x, content_latent, transform_latent, unused, 
-                 clean_reconstruction, content_mu, content_logvar, final_reconstruction) = model(data)
+                 clean_reconstruction, latent_mu, latent_logvar, final_reconstruction) = model(data)
                 
-                # Use simplified loss: final reconstruction (after affine) + KL divergence
+                # Use simplified loss: final reconstruction (after affine) + KL divergence on ALL 8D
                 total_loss, recon_loss, kl_loss = shared.simplified_affine_kl_loss(
-                    data, final_reconstruction, content_mu, content_logvar,
+                    data, final_reconstruction, latent_mu, latent_logvar,  # KL loss on full 8D latent
                     alpha=config.get('alpha', 1.0), 
                     beta=config.get('beta', 0.001)
                 )
@@ -179,10 +177,10 @@ def train_structured_autoencoder_simplified(model, train_loader, test_loader, de
             for data, _ in test_loader:
                 data = data.to(device)
                 (input_x, content_latent, transform_latent, unused, 
-                 clean_reconstruction, content_mu, content_logvar, final_reconstruction) = model(data)
+                 clean_reconstruction, latent_mu, latent_logvar, final_reconstruction) = model(data)
                 
                 total_loss, recon_loss, kl_loss = shared.simplified_affine_kl_loss(
-                    data, final_reconstruction, content_mu, content_logvar,
+                    data, final_reconstruction, latent_mu, latent_logvar,  # KL loss on full 8D latent
                     alpha=config.get('alpha', 1.0), 
                     beta=config.get('beta', 0.001)
                 )
@@ -290,13 +288,13 @@ def comprehensive_visualization_structured(model, test_loader, device, config):
     labels = test_labels[:8]
     
     with torch.no_grad():
-        # Get all model outputs
+        # Get all model outputs from unified 8D VAE
         (input_x, content_latent, transform_latent, unused, 
-         clean_reconstruction, content_mu, content_logvar, final_reconstruction) = model(samples)
+         clean_reconstruction, latent_mu, latent_logvar, final_reconstruction) = model(samples)
         
         # Compute loss components for analysis
         total_loss, recon_loss, kl_loss = shared.simplified_affine_kl_loss(
-            samples, final_reconstruction, content_mu, content_logvar,
+            samples, final_reconstruction, latent_mu, latent_logvar,  # KL loss on full 8D latent
             alpha=config.get('alpha', 1.0), beta=config.get('beta', 0.001)
         )
     
@@ -353,14 +351,23 @@ def comprehensive_visualization_structured(model, test_loader, device, config):
     # Analyze content latent space
     print(f"\n🎨 2D Content Latent Analysis:")
     print(f"  Content latent shape: {content_latent.shape}")
+    content_mu = latent_mu[:, :2]  # First 2 dimensions are content
+    content_logvar = latent_logvar[:, :2]
     print(f"  Content mu mean: {content_mu.mean(dim=0).cpu().numpy()}")
     print(f"  Content mu std: {content_mu.std(dim=0).cpu().numpy()}")
     print(f"  Content logvar mean: {content_logvar.mean(dim=0).cpu().numpy()}")
     
     print(f"\n🔧 6D Transform Latent Analysis:")
     print(f"  Transform latent shape: {transform_latent.shape}")
-    print(f"  Transform mean: {transform_latent.mean(dim=0).cpu().numpy()}")
-    print(f"  Transform std: {transform_latent.std(dim=0).cpu().numpy()}")
+    transform_mu = latent_mu[:, 2:]  # Last 6 dimensions are transform
+    transform_logvar = latent_logvar[:, 2:]
+    print(f"  Transform mu mean: {transform_mu.mean(dim=0).cpu().numpy()}")
+    print(f"  Transform logvar mean: {transform_logvar.mean(dim=0).cpu().numpy()}")
+    
+    print(f"\n🎯 UNIFIED 8D VAE:")
+    print(f"  Full latent mu shape: {latent_mu.shape}")
+    print(f"  ALL 8 dimensions under KL regularization!")
+    print(f"  This should provide much more stable training.")
 
 
 def scan_2d_content_latent_grid(model, device, grid_size=10, latent_range=(-3, 3)):
