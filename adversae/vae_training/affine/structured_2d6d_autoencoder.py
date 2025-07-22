@@ -291,13 +291,19 @@ def comprehensive_visualization_structured(model, test_loader, device, config):
     Comprehensive visualization for structured affine+KL loss model.
     Shows the key insight: affine transformation bridges reconstruction and original.
     """
+    import random
     model.eval()
     
-    # Get test samples
+    # Get test samples - randomly select 8 samples from a larger batch
     test_iter = iter(test_loader)
     test_images, test_labels = next(test_iter)
-    samples = test_images[:8].to(device)
-    labels = test_labels[:8]
+    
+    # Randomly select 8 indices from the batch
+    batch_size = test_images.size(0)
+    random_indices = random.sample(range(batch_size), min(8, batch_size))
+    
+    samples = test_images[random_indices].to(device)
+    labels = test_labels[random_indices]
     
     with torch.no_grad():
         # Get all model outputs from unified 8D VAE
