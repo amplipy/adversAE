@@ -42,9 +42,9 @@ class StructuredAutoEncoder(nn.Module):
         # Transform encoder (spatial transformations) - deterministic
         self.transform_encoder = nn.Linear(512, transform_dim)
         
-        # Decoder - ONLY takes content latent, NOT transform!
+        # Decoder
         self.decoder = nn.Sequential(
-            nn.Linear(content_dim, 512),  # Only content_dim, not content_dim + transform_dim!
+            nn.Linear(content_dim + transform_dim, 512),
             nn.ReLU(True),
             nn.Linear(512, 128 * 4 * 4),
             nn.ReLU(True),
@@ -63,6 +63,33 @@ class StructuredAutoEncoder(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
     
+    def forward(self, x):
+        # Shared encoding
+        shared_features = self.shared_encoder(x)
+        
+        # Content latent with VAE reparameterization
+        content_mu = self.content_mu(shared_features)
+        content_logvar = self.content_logvar(shared_features)
+        content_latent = self.reparameterize(content_mu, content_logvar)
+        
+        # Transform latent (deterministic)
+        transform_latent = self.transform_encoder(shared_features)
+        
+        # Combine and decode
+        combined_latent = torch.cat([content_latent, transform_latent], dim=1)
+        reconstruction = self.decoder(combined_latent)
+        
+        return reconstruction, content_latent, transform_latent, content_mu, content_logvar
+
+
+class StructuredAffineInvariantAutoEncoder(nn.Module):
+    """Combined structured autoencoder with affine transformation network"""
+    def __init__(self, content_dim=2, transform_dim=6):
+        super(StructuredAffineInvariantAutoEncoder, self).__init__()
+        
+        self.structured_autoencoder = StructuredAutoEncoder(content_dim, transform_dim)
+        self.affine_net = shared.AffineTransformationNetwork()
+    
     def apply_affine_transformation(self, images, affine_params):
         """Apply affine transformation to images using the predicted parameters"""
         batch_size = images.size(0)
@@ -79,42 +106,16 @@ class StructuredAutoEncoder(nn.Module):
         return transformed_images
     
     def forward(self, x):
-        # Shared encoding
-        shared_features = self.shared_encoder(x)
+        # Get structured reconstruction with VAE outputs
+        reconstruction, content_latent, transform_latent, content_mu, content_logvar = self.structured_autoencoder(x)
         
-        # Content latent with VAE reparameterization
-        content_mu = self.content_mu(shared_features)
-        content_logvar = self.content_logvar(shared_features)
-        content_latent = self.reparameterize(content_mu, content_logvar)
+        # Predict affine transformation parameters
+        affine_params = self.affine_net(x)
         
-        # Transform latent (deterministic)
-        transform_latent = self.transform_encoder(shared_features)
+        # Apply affine transformation to reconstruction
+        transformed_reconstruction = self.apply_affine_transformation(reconstruction, affine_params)
         
-        # Decode ONLY from content latent - this should produce clean canonical digits
-        clean_reconstruction = self.decoder(content_latent)
-        
-        # Apply affine transformation to the clean reconstruction
-        final_reconstruction = self.apply_affine_transformation(clean_reconstruction, transform_latent)
-        
-        return clean_reconstruction, final_reconstruction, content_latent, transform_latent, content_mu, content_logvar
-
-
-class StructuredAffineInvariantAutoEncoder(nn.Module):
-    """Combined structured autoencoder with affine transformation network"""
-    def __init__(self, content_dim=2, transform_dim=6):
-        super(StructuredAffineInvariantAutoEncoder, self).__init__()
-        
-        self.structured_autoencoder = StructuredAutoEncoder(content_dim, transform_dim)
-        # Remove separate affine_net since transform is handled in the structured autoencoder
-    
-    def forward(self, x):
-        # Get all outputs from structured autoencoder
-        (clean_reconstruction, final_reconstruction, content_latent, 
-         transform_latent, content_mu, content_logvar) = self.structured_autoencoder(x)
-        
-        # Return all components for analysis
-        # Order: input_x, content_latent, transform_latent, unused, clean_reconstruction, content_mu, content_logvar, final_reconstruction
-        return x, content_latent, transform_latent, None, clean_reconstruction, content_mu, content_logvar, final_reconstruction
+        return reconstruction, content_latent, transform_latent, affine_params, transformed_reconstruction, content_mu, content_logvar
 
 
 def train_structured_autoencoder_simplified(model, train_loader, test_loader, device, config, scaler=None):
@@ -143,12 +144,12 @@ def train_structured_autoencoder_simplified(model, train_loader, test_loader, de
             
             with torch.cuda.amp.autocast() if scaler else torch.enable_grad():
                 # Forward pass - get all outputs including mu and logvar
-                (input_x, content_latent, transform_latent, unused, 
-                 clean_reconstruction, content_mu, content_logvar, final_reconstruction) = model(data)
+                (reconstruction, content_latent, transform_latent, affine_params, 
+                 transformed_reconstruction, content_mu, content_logvar) = model(data)
                 
-                # Use simplified loss: final reconstruction (after affine) + KL divergence
+                # Use simplified loss: affine-transformed reconstruction + KL divergence
                 total_loss, recon_loss, kl_loss = shared.simplified_affine_kl_loss(
-                    data, final_reconstruction, content_mu, content_logvar,
+                    data, transformed_reconstruction, content_mu, content_logvar,
                     alpha=config.get('alpha', 1.0), 
                     beta=config.get('beta', 0.001)
                 )
@@ -178,11 +179,11 @@ def train_structured_autoencoder_simplified(model, train_loader, test_loader, de
         with torch.no_grad():
             for data, _ in test_loader:
                 data = data.to(device)
-                (input_x, content_latent, transform_latent, unused, 
-                 clean_reconstruction, content_mu, content_logvar, final_reconstruction) = model(data)
+                (reconstruction, content_latent, transform_latent, affine_params, 
+                 transformed_reconstruction, content_mu, content_logvar) = model(data)
                 
                 total_loss, recon_loss, kl_loss = shared.simplified_affine_kl_loss(
-                    data, final_reconstruction, content_mu, content_logvar,
+                    data, transformed_reconstruction, content_mu, content_logvar,
                     alpha=config.get('alpha', 1.0), 
                     beta=config.get('beta', 0.001)
                 )
@@ -230,8 +231,7 @@ def visualize_structured_latent_space(model, test_loader, device, num_samples=10
                 break
                 
             data = data.to(device)
-            (input_x, content_latent, transform_latent, unused, 
-             clean_reconstruction, content_mu, content_logvar, final_reconstruction) = model(data)
+            (_, content_latent, transform_latent, _, _, _, _) = model(data)
             
             content_latents.append(content_latent.cpu().numpy())
             transform_latents.append(transform_latent.cpu().numpy())
@@ -291,12 +291,12 @@ def comprehensive_visualization_structured(model, test_loader, device, config):
     
     with torch.no_grad():
         # Get all model outputs
-        (input_x, content_latent, transform_latent, unused, 
-         clean_reconstruction, content_mu, content_logvar, final_reconstruction) = model(samples)
+        (reconstruction, content_latent, transform_latent, affine_params, 
+         transformed_reconstruction, content_mu, content_logvar) = model(samples)
         
         # Compute loss components for analysis
         total_loss, recon_loss, kl_loss = shared.simplified_affine_kl_loss(
-            samples, final_reconstruction, content_mu, content_logvar,
+            samples, transformed_reconstruction, content_mu, content_logvar,
             alpha=config.get('alpha', 1.0), beta=config.get('beta', 0.001)
         )
     
@@ -309,13 +309,13 @@ def comprehensive_visualization_structured(model, test_loader, device, config):
         axes[0, i].set_title(f'Original\nDigit: {labels[i].item()}', fontsize=10)
         axes[0, i].axis('off')
         
-        # Row 2: Clean reconstruction (decoder output before affine)
-        axes[1, i].imshow(clean_reconstruction[i].cpu().squeeze(), cmap='gray')
-        axes[1, i].set_title('Clean Decoder\nOutput', fontsize=10)
+        # Row 2: Direct reconstruction (before affine correction)
+        axes[1, i].imshow(reconstruction[i].cpu().squeeze(), cmap='gray')
+        axes[1, i].set_title('Raw Decoder\nOutput', fontsize=10)
         axes[1, i].axis('off')
         
         # Row 3: After affine transformation (what the loss function optimizes)
-        axes[2, i].imshow(final_reconstruction[i].cpu().squeeze(), cmap='gray')
+        axes[2, i].imshow(transformed_reconstruction[i].cpu().squeeze(), cmap='gray')
         axes[2, i].set_title('After Affine\n(Loss Target)', fontsize=10)
         axes[2, i].axis('off')
         
@@ -328,15 +328,15 @@ def comprehensive_visualization_structured(model, test_loader, device, config):
         axes[3, i].set_ylim(-0.5, 0.5)
         axes[3, i].set_title('2D Content\nLatent', fontsize=10)
         
-        # Row 5: Transform parameters (6D)
-        params = transform_latent[i].cpu().numpy()
+        # Row 5: Affine parameters
+        params = affine_params[i].cpu().numpy()
         axes[4, i].text(0.05, 0.8, f'a={params[0]:.2f}', transform=axes[4, i].transAxes, fontsize=8)
         axes[4, i].text(0.05, 0.6, f'b={params[1]:.2f}', transform=axes[4, i].transAxes, fontsize=8)
         axes[4, i].text(0.05, 0.4, f'c={params[2]:.2f}', transform=axes[4, i].transAxes, fontsize=8)
         axes[4, i].text(0.55, 0.8, f'd={params[3]:.2f}', transform=axes[4, i].transAxes, fontsize=8)
         axes[4, i].text(0.55, 0.6, f'tx={params[4]:.2f}', transform=axes[4, i].transAxes, fontsize=8)
         axes[4, i].text(0.55, 0.4, f'ty={params[5]:.2f}', transform=axes[4, i].transAxes, fontsize=8)
-        axes[4, i].set_title('Transform Params\n(6D)', fontsize=10)
+        axes[4, i].set_title('Affine Params', fontsize=10)
         axes[4, i].axis('off')
     
     plt.suptitle('🎯 Structured 2D+6D Affine+KL Loss Model\nKey: Affine transforms decoder output into clean digits!', fontsize=14)
@@ -384,11 +384,12 @@ def scan_2d_content_latent_grid(model, device, grid_size=10, latent_range=(-3, 3
     
     # Generate images from latent vectors
     with torch.no_grad():
-        # Use only content latent for clean decoder output
-        clean_images = model.structured_autoencoder.decoder(content_vectors)
+        # Combine content and transform latents
+        combined_latent = torch.cat([content_vectors, transform_vectors], dim=1)
+        raw_images = model.structured_autoencoder.decoder(combined_latent)
     
     # Create visualization
-    images = clean_images.cpu().numpy()
+    images = raw_images.cpu().numpy()
     fig, axes = plt.subplots(grid_size, grid_size, figsize=(grid_size * 1.2, grid_size * 1.2))
     
     if grid_size == 1:
