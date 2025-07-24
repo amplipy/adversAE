@@ -260,7 +260,7 @@ def analyze_random_reconstructions(model, test_loader, device, num_samples=10, r
         model_output = model(sample_batch)
         
         # Extract components
-        complete_reconstruction = model_output[0]  # Final output after affine transform
+        complete_reconstruction = model_output[-1]  # Final output after affine transform
         content_latents = model_output[1]          # 2D content latent
         
         # Generate latent-only reconstructions (content decoder without affine)

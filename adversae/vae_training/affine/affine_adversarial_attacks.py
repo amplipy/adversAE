@@ -162,10 +162,10 @@ def visualize_affine_attack_analysis(original_imgs, attack_imgs, model, device,
     row_titles = [
         'Original Images',
         'Original Clean Recon',
-        'Original Final Recon', 
+        'Original Final Recon (+ Affine)', 
         f'{attack_name} Images (ε={epsilon})',
         'Attack Clean Recon',
-        'Attack Final Recon',
+        'Attack Final Recon (+ Affine)',
         'Latent Comparison'
     ]
     
@@ -176,24 +176,24 @@ def visualize_affine_attack_analysis(original_imgs, attack_imgs, model, device,
             axes[0, i].set_title(f'Label: {labels[i].item()}', fontsize=9)
         axes[0, i].axis('off')
         
-        # Row 2: Original clean reconstructions
-        axes[1, i].imshow(orig_clean_np[i, 0], cmap='gray', vmin=0, vmax=1)
+        # Row 2: Original clean reconstructions (rotated 90 degrees)
+        axes[1, i].imshow(np.rot90(orig_clean_np[i, 0], k=-1), cmap='gray', vmin=0, vmax=1)
         axes[1, i].axis('off')
         
-        # Row 3: Original final reconstructions
-        axes[2, i].imshow(orig_final_np[i, 0], cmap='gray', vmin=0, vmax=1)
+        # Row 3: Original final reconstructions (AFTER affine transform, rotated 90 degrees)
+        axes[2, i].imshow(np.rot90(orig_final_np[i, 0], k=-1), cmap='gray', vmin=0, vmax=1)
         axes[2, i].axis('off')
         
         # Row 4: Adversarial images
         axes[3, i].imshow(attack_np[i, 0], cmap='gray', vmin=0, vmax=1)
         axes[3, i].axis('off')
         
-        # Row 5: Adversarial clean reconstructions
-        axes[4, i].imshow(adv_clean_np[i, 0], cmap='gray', vmin=0, vmax=1)
+        # Row 5: Adversarial clean reconstructions (rotated 90 degrees)
+        axes[4, i].imshow(np.rot90(adv_clean_np[i, 0], k=-1), cmap='gray', vmin=0, vmax=1)
         axes[4, i].axis('off')
         
-        # Row 6: Adversarial final reconstructions
-        axes[5, i].imshow(adv_final_np[i, 0], cmap='gray', vmin=0, vmax=1)
+        # Row 6: Adversarial final reconstructions (AFTER affine transform, rotated 90 degrees)
+        axes[5, i].imshow(np.rot90(adv_final_np[i, 0], k=-1), cmap='gray', vmin=0, vmax=1)
         axes[5, i].axis('off')
         
         # Row 7: Latent space comparison

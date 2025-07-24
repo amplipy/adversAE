@@ -1,0 +1,23 @@
+# Requirements for Structured VAE Explorer Streamlit App
+# Updated with compatible versions to avoid torchvision::nms errors
+
+# Core dependencies - using compatible versions
+streamlit>=1.28.0
+torch>=2.0.0,<2.2.0
+torchvision>=0.15.0,<0.17.0
+numpy>=1.21.0,<1.25.0
+matplotlib>=3.5.0,<3.8.0
+seaborn>=0.11.0
+pandas>=1.3.0,<2.1.0
+
+# Optional but recommended
+plotly>=5.10.0  # For interactive plots (future enhancement)
+Pillow>=8.3.0,<10.0.0   # Image processing
+scipy>=1.7.0,<1.12.0    # Scientific computing
+
+# Alternative installation approach if torchvision issues persist:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# Development (optional)
+# streamlit-autorefresh  # Auto-refresh capability
+# streamlit-plotly-events  # Interactive plotly events
