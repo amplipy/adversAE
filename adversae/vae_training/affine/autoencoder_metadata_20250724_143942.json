@@ -1,0 +1,32 @@
+{
+  "timestamp": "20250724_143942",
+  "config": {
+    "content_latent_dim": 2,
+    "transform_latent_dim": 6,
+    "total_latent_dim": 8,
+    "epochs": 40,
+    "learning_rate": 0.001,
+    "batch_size_train": 256,
+    "batch_size_test": 128,
+    "alpha": 1.0,
+    "beta": 0.01,
+    "force_cuda": true,
+    "mixed_precision": true,
+    "gradient_clip": 1.0,
+    "pin_memory": true,
+    "num_workers": 4,
+    "weight_decay": 1e-05,
+    "lr_scheduler": true,
+    "early_stopping": true,
+    "patience": 15,
+    "data_dir": "../data",
+    "save_dir": "./",
+    "checkpoint_freq": 10
+  },
+  "final_losses": {
+    "train_loss": 0.7047308450049542,
+    "test_loss": 0.710378997688052,
+    "recon_loss": 0.6058245866856676,
+    "kl_loss": 9.890626022663522
+  }
+}
