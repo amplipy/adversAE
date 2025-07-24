@@ -272,9 +272,9 @@ def analyze_random_reconstructions(model, test_loader, device, num_samples=10, r
         for i in range(num_samples):
             # Apply rotation to all images for consistency with grid scan
             if rotate_images:
-                original_img = np.rot90(sample_batch[i].cpu().squeeze().numpy(), k=-1)
+                original_img = (sample_batch[i].cpu().squeeze().numpy())
                 latent_img = np.rot90(latent_decoded[i].cpu().squeeze().numpy(), k=-1)
-                complete_img = np.rot90(complete_reconstruction[i].cpu().squeeze().numpy(), k=-1)
+                complete_img = (complete_reconstruction[i].cpu().squeeze().numpy())
             else:
                 original_img = sample_batch[i].cpu().squeeze().numpy()
                 latent_img = latent_decoded[i].cpu().squeeze().numpy()
@@ -301,9 +301,9 @@ def analyze_random_reconstructions(model, test_loader, device, num_samples=10, r
             axes[1, i].set_xlabel(f'({content_coord[0]:.1f}, {content_coord[1]:.1f})', fontsize=8)
         
         # Add row labels
-        axes[0, 0].set_ylabel('Original\nMNIST', rotation=90, fontsize=12, ha='right')
+        axes[0, 0].set_ylabel('Original\nMNIST', rotation=0, fontsize=12, ha='right')
         axes[1, 0].set_ylabel('Latent\nDecoded', rotation=90, fontsize=12, ha='right')
-        axes[2, 0].set_ylabel('Complete\nReconstruction', rotation=90, fontsize=12, ha='right')
+        axes[2, 0].set_ylabel('Complete\nReconstruction', rotation=0, fontsize=12, ha='right')
         
         plt.suptitle('🎲 Random Digit Reconstruction Pipeline', fontsize=16, y=0.95)
         plt.tight_layout()
