@@ -31,8 +31,18 @@ class AffineAdversarialAttacks:
         self.device = device
         self.model.eval()
     
-    def fgsm_attack(self, images, labels, epsilon):
+    def fgsm_attack(self, images, labels, epsilon, **kwargs):
         """Fast Gradient Sign Method attack on affine autoencoder"""
+
+        if kwargs.get("debug", False):
+            print("FGSM Attack - Debug Info:")
+            print(f"Images shape: {images.shape}")
+            print(f"Labels shape: {labels.shape}")
+        
+        alpha = kwargs.get("alpha", 0.01)
+        beta = kwargs.get("beta", 0.008)
+        
+
         images = images.clone().detach().requires_grad_(True)
         
         # Forward pass to get all outputs from unified 8D VAE
@@ -108,16 +118,18 @@ class AffineAdversarialAttacks:
         
         # Reconstruct from adversarial latent
         with torch.no_grad():
-            # Sample from adversarial latent distribution
-            adv_latent = self.model.reparameterize(adv_latent_mu, latent_logvar)
+            # Manual reparameterization since wrapper doesn't expose the method
+            std = torch.exp(0.5 * latent_logvar)
+            eps = torch.randn_like(std)
+            adv_latent = adv_latent_mu + eps * std
             
             # Split into content and transform
             adv_content = adv_latent[:, :2]
             adv_transform = adv_latent[:, 2:]
             
-            # Decode and apply transform
-            adv_clean_recon = self.model.decoder(adv_content)
-            adv_final_recon = self.model.apply_affine_transformation(adv_clean_recon, adv_transform)
+            # Decode and apply transform using the inner autoencoder
+            adv_clean_recon = self.model.structured_autoencoder.decoder(adv_content)
+            adv_final_recon = self.model.structured_autoencoder.apply_affine_transformation(adv_clean_recon, adv_transform)
         
         return adv_final_recon.detach()
 
